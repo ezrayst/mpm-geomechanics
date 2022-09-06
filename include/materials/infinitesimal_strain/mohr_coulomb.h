@@ -13,7 +13,7 @@ namespace mpm {
 
 namespace mohrcoulomb {
 //! Failure state
-enum FailureState { Elastic = 0, Shear = 1, Tensile = 2 };
+enum FailureState { Elastic, Tensile, Shear };
 }  // namespace mohrcoulomb
 
 //! MohrCoulomb class
@@ -21,7 +21,7 @@ enum FailureState { Elastic = 0, Shear = 1, Tensile = 2 };
 //! \details Mohr Coulomb material model with softening
 //! \tparam Tdim Dimension
 template <unsigned Tdim>
-class MohrCoulomb : public InfinitesimalElastoPlastic<Tdim> {
+class MohrCoulomb : public Material<Tdim> {
  public:
   //! Define a vector of 6 dof
   using Vector6d = Eigen::Matrix<double, 6, 1>;
@@ -47,13 +47,6 @@ class MohrCoulomb : public InfinitesimalElastoPlastic<Tdim> {
 
   //! State variables
   std::vector<std::string> state_variables() const override;
-
-  //! Initialise material
-  //! \brief Function that initialise material to be called at the beginning of
-  //! time step
-  void initialise(mpm::dense_map* state_vars) override {
-    (*state_vars).at("yield_state") = 0;
-  };
 
   //! Compute stress
   //! \param[in] stress Stress
@@ -102,28 +95,10 @@ class MohrCoulomb : public InfinitesimalElastoPlastic<Tdim> {
 
  private:
   //! Compute elastic tensor
-  //! \param[in] state_vars History-dependent state variables
-  Matrix6x6 compute_elastic_tensor(mpm::dense_map* state_vars);
+  bool compute_elastic_tensor();
 
-  //! Compute constitutive relations matrix for elasto-plastic material
-  //! \param[in] stress Stress
-  //! \param[in] dstrain Strain
-  //! \param[in] particle Constant point to particle base
-  //! \param[in] state_vars History-dependent state variables
-  //! \param[in] hardening Boolean to consider hardening, default=true. If
-  //! perfect-plastic tensor is needed pass false
-  //! \retval dmatrix Constitutive relations mattrix
-  Matrix6x6 compute_elasto_plastic_tensor(const Vector6d& stress,
-                                          const Vector6d& dstrain,
-                                          const ParticleBase<Tdim>* ptr,
-                                          mpm::dense_map* state_vars,
-                                          bool hardening = true) override;
-
-  //! Inline ternary function to check negative or zero numbers
-  inline double check_low(double val) {
-    return (val > 1.0e-15 ? val : 1.0e-15);
-  }
-
+  //! Elastic stiffness matrix
+  Matrix6x6 de_;
   //! Density
   double density_{std::numeric_limits<double>::max()};
   //! Youngs modulus
@@ -138,27 +113,34 @@ class MohrCoulomb : public InfinitesimalElastoPlastic<Tdim> {
   double phi_peak_{std::numeric_limits<double>::max()};
   //! Maximum dilation angle psi
   double psi_peak_{std::numeric_limits<double>::max()};
+  //! Undrained friction angle from drained strength
+  double phi_undrained_{std::numeric_limits<double>::max()};
   //! Maximum cohesion
   double cohesion_peak_{std::numeric_limits<double>::max()};
+  //! Maximum su_over_pi
+  double su_over_pi_peak_{std::numeric_limits<double>::max()};
   //! Residual friction angle phi
   double phi_residual_{std::numeric_limits<double>::max()};
   //! Residual dilation angle psi
   double psi_residual_{std::numeric_limits<double>::max()};
   //! Residual cohesion
   double cohesion_residual_{std::numeric_limits<double>::max()};
+  //! Maximum su_over_pi
+  double su_over_pi_residual_{std::numeric_limits<double>::max()};
   //! Peak plastic deviatoric strain
   double pdstrain_peak_{std::numeric_limits<double>::max()};
+  //! su_over_p_bool
+  bool su_over_p_bool_{false};
+  //! SPT-N
+  double sptn_{std::numeric_limits<double>::max()};
+  //! SPT-N bool
+  bool sptn_bool_{false};
   //! Residual plastic deviatoric strain
   double pdstrain_residual_{std::numeric_limits<double>::max()};
   //! Tension cutoff
   double tension_cutoff_{std::numeric_limits<double>::max()};
   //! softening
   bool softening_{false};
-  //! Failure state map
-  std::map<int, mpm::mohrcoulomb::FailureState> yield_type_ = {
-      {0, mpm::mohrcoulomb::FailureState::Elastic},
-      {1, mpm::mohrcoulomb::FailureState::Shear},
-      {2, mpm::mohrcoulomb::FailureState::Tensile}};
 };  // MohrCoulomb class
 }  // namespace mpm
 

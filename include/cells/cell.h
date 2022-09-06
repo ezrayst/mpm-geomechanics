@@ -166,6 +166,9 @@ class Cell {
   //! Return the mean_length
   double mean_length() const { return mean_length_; }
 
+  //! Return the max_length
+  double max_length() const { return max_length_; }
+
   //! Return nodal coordinates
   Eigen::MatrixXd nodal_coordinates() const { return nodal_coordinates_; }
 
@@ -461,6 +464,8 @@ class Cell {
   VectorDim centroid_;
   //! mean_length of cell
   double mean_length_{std::numeric_limits<double>::max()};
+  //! mean_length of cell
+  double max_length_{std::numeric_limits<double>::max()};
   //! particles ids in cell
   std::vector<Index> particles_;
   //! Number of global nparticles
@@ -484,6 +489,9 @@ class Cell {
   //! Normal of face
   //! first-> face_id, second->vector of the normal
   std::map<unsigned, Eigen::VectorXd> face_normals_;
+
+  //! Boundary particles that correspond to each edge of the boundary
+  std::map<unsigned, std::vector<Index>> boundary_edge_particles_;
 
   /**
    * \defgroup ImplicitVariables Variables for single-phase implicit

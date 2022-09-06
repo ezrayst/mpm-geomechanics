@@ -2,7 +2,7 @@
 template <unsigned Tdim>
 mpm::MohrCoulomb<Tdim>::MohrCoulomb(unsigned id,
                                     const Json& material_properties)
-    : InfinitesimalElastoPlastic<Tdim>(id, material_properties) {
+    : Material<Tdim>(id, material_properties) {
   try {
     // General parameters
     // Density
@@ -15,21 +15,40 @@ mpm::MohrCoulomb<Tdim>::MohrCoulomb(unsigned id,
         material_properties.at("poisson_ratio").template get<double>();
     // Softening status
     softening_ = material_properties.at("softening").template get<bool>();
+    // SPT-N Bool
+    sptn_bool_ = material_properties.at("spt_n_bool").template get<bool>();
+    // SPT-N
+    if (sptn_bool_)
+      sptn_ = material_properties.at("spt_n").template get<double>();
     // Peak friction, dilation and cohesion
-    phi_peak_ =
-        material_properties.at("friction").template get<double>() * M_PI / 180.;
-    psi_peak_ =
-        material_properties.at("dilation").template get<double>() * M_PI / 180.;
+    // phi_peak_ =
+    //     material_properties.at("friction").template get<double>() * M_PI /
+    //     180.;
+    // psi_peak_ =
+    //     material_properties.at("dilation").template get<double>() * M_PI /
+    //     180.;
     cohesion_peak_ = material_properties.at("cohesion").template get<double>();
+    // Peak su/pi
+    phi_peak_ = 0 * M_PI / 180.;
+    psi_peak_ = 0 * M_PI / 180.;
+    phi_undrained_ =
+        material_properties.at("undrained_friction").template get<double>() * M_PI /
+        180.;
+    su_over_pi_peak_ =
+        material_properties.at("su_over_p_peak").template get<double>();
     // Residual friction, dilation and cohesion
     phi_residual_ =
         material_properties.at("residual_friction").template get<double>() *
         M_PI / 180.;
-    psi_residual_ =
-        material_properties.at("residual_dilation").template get<double>() *
-        M_PI / 180.;
+    // psi_residual_ =
+    //     material_properties.at("residual_dilation").template get<double>() *
+    //     M_PI / 180.;
     cohesion_residual_ =
         material_properties.at("residual_cohesion").template get<double>();
+    phi_residual_ = 0 * M_PI / 180.;
+    psi_residual_ = 0 * M_PI / 180.;
+    su_over_pi_residual_ =
+        material_properties.at("su_over_p_residual").template get<double>();
     // Peak plastic deviatoric strain
     pdstrain_peak_ =
         material_properties.at("peak_pdstrain").template get<double>();
@@ -39,12 +58,17 @@ mpm::MohrCoulomb<Tdim>::MohrCoulomb(unsigned id,
     // Tensile strength
     tension_cutoff_ =
         material_properties.at("tension_cutoff").template get<double>();
+    // Su_over_p status
+    su_over_p_bool_ =
+        material_properties.at("su_over_p_bool").template get<bool>();
     // Properties
     properties_ = material_properties;
     // Bulk modulus
     bulk_modulus_ = youngs_modulus_ / (3.0 * (1. - 2. * poisson_ratio_));
     // Shear modulus
     shear_modulus_ = youngs_modulus_ / (2.0 * (1 + poisson_ratio_));
+    // Set elastic tensor
+    this->compute_elastic_tensor();
   } catch (std::exception& except) {
     console_->error("Material parameter not set: {}\n", except.what());
   }
@@ -53,30 +77,22 @@ mpm::MohrCoulomb<Tdim>::MohrCoulomb(unsigned id,
 //! Initialise state variables
 template <unsigned Tdim>
 mpm::dense_map mpm::MohrCoulomb<Tdim>::initialise_state_variables() {
-  mpm::dense_map state_vars = {
-      // MC parameters
-      // Yield state: 0: elastic, 1: shear, 2: tensile
-      {"yield_state", 0},
-      // Friction (phi)
-      {"phi", this->phi_peak_},
-      // Dilation (psi)
-      {"psi", this->psi_peak_},
-      // Cohesion
-      {"cohesion", this->cohesion_peak_},
-      // Tensile cutoff (automatically adjusted according to the apex value)
-      {"tension_cutoff",
-       check_low((tension_cutoff_ < cohesion_peak_ / std::tan(phi_peak_))
-                     ? tension_cutoff_
-                     : cohesion_peak_ / std::tan(phi_peak_))},
-      // Stress invariants
-      // Epsilon
-      {"epsilon", 0.},
-      // Rho
-      {"rho", 0.},
-      // Theta
-      {"theta", 0.},
-      // Plastic deviatoric strain
-      {"pdstrain", 0.}};
+  mpm::dense_map state_vars = {// MC parameters
+                               // Friction (phi)
+                               {"phi", this->phi_peak_},
+                               // Dilation (psi)
+                               {"psi", this->psi_peak_},
+                               // Cohesion
+                               {"cohesion", this->cohesion_peak_},
+                               // Stress invariants
+                               // Epsilon
+                               {"epsilon", 0.},
+                               // Rho
+                               {"rho", 0.},
+                               // Theta
+                               {"theta", 0.},
+                               // Plastic deviatoric strain
+                               {"pdstrain", 0.}};
   return state_vars;
 }
 
@@ -84,9 +100,28 @@ mpm::dense_map mpm::MohrCoulomb<Tdim>::initialise_state_variables() {
 template <unsigned Tdim>
 std::vector<std::string> mpm::MohrCoulomb<Tdim>::state_variables() const {
   const std::vector<std::string> state_vars = {
-      "yield_state", "phi", "psi",   "cohesion", "tension_cutoff",
-      "epsilon",     "rho", "theta", "pdstrain"};
+      "phi", "psi", "cohesion", "epsilon", "rho", "theta", "pdstrain"};
   return state_vars;
+}
+
+//! Compute elastic tensor
+template <unsigned Tdim>
+bool mpm::MohrCoulomb<Tdim>::compute_elastic_tensor() {
+  // Shear modulus
+  const double G = shear_modulus_;
+  const double a1 = bulk_modulus_ + (4.0 / 3.0) * G;
+  const double a2 = bulk_modulus_ - (2.0 / 3.0) * G;
+  // compute elastic stiffness matrix
+  // clang-format off
+  de_(0,0)=a1;    de_(0,1)=a2;    de_(0,2)=a2;    de_(0,3)=0;    de_(0,4)=0;    de_(0,5)=0;
+  de_(1,0)=a2;    de_(1,1)=a1;    de_(1,2)=a2;    de_(1,3)=0;    de_(1,4)=0;    de_(1,5)=0;
+  de_(2,0)=a2;    de_(2,1)=a2;    de_(2,2)=a1;    de_(2,3)=0;    de_(2,4)=0;    de_(2,5)=0;
+  de_(3,0)= 0;    de_(3,1)= 0;    de_(3,2)= 0;    de_(3,3)=G;    de_(3,4)=0;    de_(3,5)=0;
+  de_(4,0)= 0;    de_(4,1)= 0;    de_(4,2)= 0;    de_(4,3)=0;    de_(4,4)=G;    de_(4,5)=0;
+  de_(5,0)= 0;    de_(5,1)= 0;    de_(5,2)= 0;    de_(5,3)=0;    de_(5,4)=0;    de_(5,5)=G;
+  // clang-format on
+
+  return true;
 }
 
 //! Compute stress invariants
@@ -118,11 +153,10 @@ typename mpm::mohrcoulomb::FailureState
   // Get MC parameters
   const double phi = state_vars.at("phi");
   const double cohesion = state_vars.at("cohesion");
-  const double tension_cutoff = state_vars.at("tension_cutoff");
   // Compute yield functions (tension & shear)
   // Tension
   (*yield_function)(0) = std::sqrt(2. / 3.) * cos(theta) * rho +
-                         epsilon / std::sqrt(3.) - tension_cutoff;
+                         epsilon / std::sqrt(3.) - tension_cutoff_;
   // Shear
   (*yield_function)(1) =
       std::sqrt(1.5) * rho *
@@ -136,7 +170,7 @@ typename mpm::mohrcoulomb::FailureState
     // Compute tension and shear edge parameters
     const double n_phi = (1. + sin(phi)) / (1. - sin(phi));
     const double sigma_p =
-        tension_cutoff * n_phi - 2. * cohesion * std::sqrt(n_phi);
+        tension_cutoff_ * n_phi - 2. * cohesion * std::sqrt(n_phi);
     const double alpha_p = std::sqrt(1. + n_phi * n_phi) + n_phi;
     // Compute the shear-tension edge
     const double h =
@@ -172,7 +206,6 @@ void mpm::MohrCoulomb<Tdim>::compute_df_dp(
   // Get MC parameters
   const double phi = (*state_vars).at("phi");
   const double psi = (*state_vars).at("psi");
-  const double tension_cutoff = (*state_vars).at("tension_cutoff");
   // Get equivalent plastic deviatoric strain
   const double pdstrain = (*state_vars).at("pdstrain");
   // Compute dF / dEpsilon,  dF / dRho, dF / dTheta
@@ -223,13 +256,13 @@ void mpm::MohrCoulomb<Tdim>::compute_df_dp(
     // Compute dP/dRt
     const double dp_drt =
         1.5 * rho * rho * rt /
-        check_low(std::sqrt(xit * xit * tension_cutoff * tension_cutoff +
-                            1.5 * rt * rt * rho * rho));
+        std::sqrt(xit * xit * tension_cutoff_ * tension_cutoff_ +
+                  1.5 * rt * rt * rho * rho);
     // Compute dP/dRho
     const double dp_drho =
         1.5 * rho * rt * rt /
-        check_low(std::sqrt(xit * xit * tension_cutoff * tension_cutoff +
-                            1.5 * rt * rt * rho * rho));
+        std::sqrt(xit * xit * tension_cutoff_ * tension_cutoff_ +
+                  1.5 * rt * rt * rho * rho);
     // Compute dP/dEpsilon
     const double dp_depsilon = 1. / std::sqrt(3.);
     // Compute dRt/dThera
@@ -318,9 +351,46 @@ template <unsigned Tdim>
 Eigen::Matrix<double, 6, 1> mpm::MohrCoulomb<Tdim>::compute_stress(
     const Vector6d& stress, const Vector6d& dstrain,
     const ParticleBase<Tdim>* ptr, mpm::dense_map* state_vars) {
-  // Get previous time step state variable
-  const auto prev_state_vars = (*state_vars);
+  // Get equivalent plastic deviatoric strain
   const double pdstrain = (*state_vars).at("pdstrain");
+
+  // Get stress beginning and compute p_beginning (compression positive)
+  const auto stress_beginning = ptr->stress_beginning();
+  double p_beginning =
+      -(stress_beginning(0) + stress_beginning(1) + stress_beginning(2)) / 3.0;
+  double sigma_v_beginning = -stress_beginning(1) / 101000;  // in atm
+
+  double adopted_cohesion_peak;
+  double adopted_cohesion_residual;
+  double x_coord;
+
+  // Compute cohesion from su/p
+  if (su_over_p_bool_) {
+    adopted_cohesion_residual = su_over_pi_residual_ * p_beginning;
+    adopted_cohesion_peak = su_over_pi_peak_ * p_beginning;
+  } else if (sptn_bool_) {
+    // Weber 2015, change it to Pa
+    adopted_cohesion_residual =
+        (std::exp(0.1407 * sptn_ + 4.2399 * std::pow(sigma_v_beginning, 0.12)) -
+         0.43991 * (std::pow(sptn_, 1.45) +
+                    0.2 * sptn_ * std::pow(sigma_v_beginning, 2.48) + 41.13)) *
+        47.880208;
+    adopted_cohesion_peak = adopted_cohesion_residual;
+    // Reduce 1/2 for those materials beyond the upstream toe
+    // x_coord = ptr->coordinates()[0];
+    // if (x_coord < -104) {
+    //   adopted_cohesion_peak /= 2;
+    //   adopted_cohesion_residual /= 2;
+    // }
+  } else {
+    // Undrained shear strength at initial stresses
+    adopted_cohesion_peak = -stress_beginning(1) * tan(phi_undrained_) + cohesion_peak_;
+    adopted_cohesion_residual = -stress_beginning(1) * tan(phi_undrained_) + cohesion_residual_;
+  }
+
+  // Update state_vars cohesion
+  (*state_vars).at("cohesion") = adopted_cohesion_peak;
+
   // Update MC parameters using a linear softening rule
   if (softening_ && pdstrain > pdstrain_peak_) {
     if (pdstrain < pdstrain_residual_) {
@@ -333,25 +403,18 @@ Eigen::Matrix<double, 6, 1> mpm::MohrCoulomb<Tdim>::compute_stress(
           ((psi_peak_ - psi_residual_) * (pdstrain - pdstrain_residual_) /
            (pdstrain_peak_ - pdstrain_residual_));
       (*state_vars).at("cohesion") =
-          cohesion_residual_ + ((cohesion_peak_ - cohesion_residual_) *
+          adopted_cohesion_residual + ((adopted_cohesion_peak - adopted_cohesion_residual) *
                                 (pdstrain - pdstrain_residual_) /
                                 (pdstrain_peak_ - pdstrain_residual_));
     } else {
       (*state_vars).at("phi") = phi_residual_;
       (*state_vars).at("psi") = psi_residual_;
-      (*state_vars).at("cohesion") = cohesion_residual_;
+      (*state_vars).at("cohesion") = adopted_cohesion_residual;
     }
-    // Modify tension cutoff acoording to softening law
-    const double apex =
-        (*state_vars).at("cohesion") / std::tan((*state_vars).at("phi"));
-    if ((*state_vars).at("tension_cutoff") > apex)
-      (*state_vars).at("tension_cutoff") = check_low(apex);
   }
   //-------------------------------------------------------------------------
   // Elastic-predictor stage: compute the trial stress
-  (*state_vars).at("yield_state") = 0;
-  Matrix6x6 de = this->compute_elastic_tensor(state_vars);
-  Vector6d trial_stress = stress + (de * dstrain);
+  Vector6d trial_stress = stress + (this->de_ * dstrain);
   // Compute stress invariants based on trial stress
   this->compute_stress_invariants(trial_stress, state_vars);
   // Compute yield function based on the trial stress
@@ -359,10 +422,8 @@ Eigen::Matrix<double, 6, 1> mpm::MohrCoulomb<Tdim>::compute_stress(
   auto yield_type_trial =
       this->compute_yield_state(&yield_function_trial, (*state_vars));
   // Return the updated stress in elastic state
-  if (yield_type_trial == mpm::mohrcoulomb::FailureState::Elastic) {
-    (*state_vars).at("yield_state") = 0;
+  if (yield_type_trial == mpm::mohrcoulomb::FailureState::Elastic)
     return trial_stress;
-  }
   //-------------------------------------------------------------------------
   // Plastic-corrector stage: correct the stress back to the yield surface
   // Define tolerance of yield function
@@ -376,18 +437,13 @@ Eigen::Matrix<double, 6, 1> mpm::MohrCoulomb<Tdim>::compute_stress(
                       &df_dsigma_trial, &dp_dsigma_trial, &dp_dq_trial,
                       &softening_trial);
   double yield_trial = 0.;
-  if (yield_type_trial == mpm::mohrcoulomb::FailureState::Tensile) {
-    (*state_vars).at("yield_state") = 2;
+  if (yield_type_trial == mpm::mohrcoulomb::FailureState::Tensile)
     yield_trial = yield_function_trial(0);
-  }
-  if (yield_type_trial == mpm::mohrcoulomb::FailureState::Shear) {
-    (*state_vars).at("yield_state") = 1;
+  if (yield_type_trial == mpm::mohrcoulomb::FailureState::Shear)
     yield_trial = yield_function_trial(1);
-  }
-  de = this->compute_elastic_tensor(state_vars);
   double lambda_trial =
       yield_trial /
-      ((df_dsigma_trial.transpose() * de).dot(dp_dsigma_trial.transpose()) +
+      ((df_dsigma_trial.transpose() * de_).dot(dp_dsigma_trial.transpose()) +
        softening_trial);
   // Compute stress invariants based on stress input
   this->compute_stress_invariants(stress, state_vars);
@@ -408,8 +464,8 @@ Eigen::Matrix<double, 6, 1> mpm::MohrCoulomb<Tdim>::compute_stress(
   this->compute_df_dp(yield_type, state_vars, stress, &df_dsigma, &dp_dsigma,
                       &dp_dq, &softening);
   const double lambda =
-      ((df_dsigma.transpose() * de).dot(dstrain)) /
-      (((df_dsigma.transpose() * de).dot(dp_dsigma)) + softening);
+      ((df_dsigma.transpose() * this->de_).dot(dstrain)) /
+      (((df_dsigma.transpose() * this->de_).dot(dp_dsigma)) + softening);
   // Initialise updated stress
   Vector6d updated_stress = trial_stress;
   // Initialise incremental of plastic deviatoric strain
@@ -417,12 +473,12 @@ Eigen::Matrix<double, 6, 1> mpm::MohrCoulomb<Tdim>::compute_stress(
   // Correction stress based on stress
   if (fabs(yield) < Tolerance) {
     // Compute updated stress
-    updated_stress += -(lambda * de * dp_dsigma);
+    updated_stress -= (lambda * this->de_ * dp_dsigma);
     // Compute incremental of plastic deviatoric strain
     dpdstrain = lambda * dp_dq;
   } else {
     // Compute updated stress
-    updated_stress += -(lambda_trial * de * dp_dsigma_trial);
+    updated_stress -= (lambda_trial * this->de_ * dp_dsigma_trial);
     // Compute incremental of plastic deviatoric strain
     dpdstrain = lambda_trial * dp_dq_trial;
   }
@@ -453,78 +509,17 @@ Eigen::Matrix<double, 6, 1> mpm::MohrCoulomb<Tdim>::compute_stress(
     // Compute plastic multiplier based on updated stress
     lambda_trial =
         yield_trial /
-        ((df_dsigma_trial.transpose() * de).dot(dp_dsigma_trial.transpose()) +
+        ((df_dsigma_trial.transpose() * de_).dot(dp_dsigma_trial.transpose()) +
          softening_trial);
     // Correct stress back to the yield surface
-    updated_stress += -(lambda_trial * de * dp_dsigma_trial);
+    updated_stress -= (lambda_trial * this->de_ * dp_dsigma_trial);
     // Update incremental of plastic deviatoric strain
     dpdstrain += lambda_trial * dp_dq_trial;
   }
   // Compute stress invariants based on updated stress
   this->compute_stress_invariants(updated_stress, state_vars);
-
   // Update plastic deviatoric strain
   (*state_vars).at("pdstrain") += dpdstrain;
 
   return updated_stress;
-}
-
-//! Compute elastic tensor
-template <unsigned Tdim>
-Eigen::Matrix<double, 6, 6> mpm::MohrCoulomb<Tdim>::compute_elastic_tensor(
-    mpm::dense_map* state_vars) {
-  // Shear modulus
-  const double G = shear_modulus_;
-  const double a1 = bulk_modulus_ + (4.0 / 3.0) * G;
-  const double a2 = bulk_modulus_ - (2.0 / 3.0) * G;
-  // compute elastic stiffness matrix
-  // clang-format off
-  Matrix6x6 de = Matrix6x6::Zero();
-  de(0,0)=a1;    de(0,1)=a2;    de(0,2)=a2;
-  de(1,0)=a2;    de(1,1)=a1;    de(1,2)=a2;
-  de(2,0)=a2;    de(2,1)=a2;    de(2,2)=a1;
-  de(3,3)=G;     de(4,4)=G;     de(5,5)=G;
-  // clang-format on
-
-  return de;
-}
-
-//! Compute constitutive relations matrix for elasto-plastic material
-template <unsigned Tdim>
-Eigen::Matrix<double, 6, 6>
-    mpm::MohrCoulomb<Tdim>::compute_elasto_plastic_tensor(
-        const Vector6d& stress, const Vector6d& dstrain,
-        const ParticleBase<Tdim>* ptr, mpm::dense_map* state_vars,
-        bool hardening) {
-
-  mpm::mohrcoulomb::FailureState yield_type =
-      yield_type_.at(int((*state_vars).at("yield_state")));
-  // Return the updated stress in elastic state
-  const Matrix6x6 de = this->compute_elastic_tensor(state_vars);
-  if (yield_type == mpm::mohrcoulomb::FailureState::Elastic) {
-    return de;
-  }
-
-  //! Elasto-plastic stiffness matrix
-  Matrix6x6 d_ep;
-  // Compute df_dsigma dp_dsigma
-  double softening = 0.;
-  double dp_dq = 0.;
-  Vector6d df_dsigma = Vector6d::Zero();
-  Vector6d dp_dsigma = Vector6d::Zero();
-  // Compute stress invariants based on trial stress
-  this->compute_stress_invariants(stress, state_vars);
-  this->compute_df_dp(yield_type, state_vars, stress, &df_dsigma, &dp_dsigma,
-                      &dp_dq, &softening);
-
-  // Compute the d_ep tensor
-  Eigen::Matrix<double, 6, 1> de_dpdsigma = de * dp_dsigma;
-  double dfdsigma_de_dpdsigma = df_dsigma.dot(de_dpdsigma);
-  Eigen::Matrix<double, 6, 1> de_dfdsigma = de * df_dsigma;
-
-  if (!hardening) softening = 0.;
-  d_ep = de - 1. / (dfdsigma_de_dpdsigma + softening) *
-                  (de_dpdsigma * de_dfdsigma.transpose());
-
-  return d_ep;
 }
